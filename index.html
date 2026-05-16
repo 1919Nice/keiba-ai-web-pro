@@ -1,0 +1,131 @@
+
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>{{ app_name }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#d4af37">
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#090909; color:#f5f0df; }
+    header { padding:18px 22px; background:#111; border-bottom:1px solid #c9a227; position:sticky; top:0; z-index:1; }
+    h1 { margin:0; color:#d4af37; letter-spacing:.04em; font-size:24px; }
+    main { max-width:1180px; margin:0 auto; padding:22px; }
+    .card { background:#151515; border:1px solid #3b3218; border-radius:16px; padding:18px; margin-bottom:18px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+    label { display:block; margin:10px 0 6px; color:#d4af37; font-weight:700; }
+    input, select { width:100%; box-sizing:border-box; padding:12px; border-radius:10px; border:1px solid #4a4a4a; background:#0e0e0e; color:#fff; font-size:16px; }
+    button { margin-top:14px; padding:13px 18px; border-radius:999px; border:0; background:#d4af37; color:#111; font-weight:800; cursor:pointer; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; }
+    .badge { display:inline-block; padding:4px 9px; border-radius:999px; background:#2b230e; color:#f5d76e; border:1px solid #806a22; margin-right:5px; }
+    table { width:100%; border-collapse:collapse; overflow:hidden; border-radius:12px; }
+    th, td { padding:10px 8px; border-bottom:1px solid #2d2d2d; text-align:left; font-size:14px; }
+    th { color:#d4af37; background:#111; position:sticky; top:62px; }
+    .mark { font-size:22px; font-weight:900; color:#ffd966; }
+    .small { color:#b9b9b9; font-size:13px; line-height:1.55; }
+    .warn { color:#ffdf80; }
+    ul { margin-top:8px; }
+    li { margin:6px 0; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>{{ app_name }}</h1>
+</header>
+<main>
+  <div class="card">
+    <h2>レース入力・データ取得</h2>
+    <form method="post">
+      <label>レース名</label>
+      <input name="race_name" placeholder="例：ヴィクトリアマイル" required>
+      <label>競馬場</label>
+      <select name="venue">
+        {% for v in venues %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+      </select>
+      <label>出馬表ページURL（任意）</label>
+      <input name="source_url" placeholder="公開出馬表URLを入れると、馬名・馬番などを取得します">
+      <button type="submit">データ取得して予想する</button>
+    </form>
+    <p class="small">対象データ：基本情報、枠順、斤量、馬齢、オッズ、血統、近走、競馬場適性、コース適性、騎手成績、調教師成績、展開、追い切り、馬体、パドック、返し馬、馬場、期待値。</p>
+  </div>
+
+  {% if race %}
+  <div class="card">
+    <h2>{{ race.race_name }}</h2>
+    <span class="badge">{{ race.venue }}</span>
+    <span class="badge">{{ race.course }}</span>
+    <span class="badge">{{ race.distance }}</span>
+    <span class="badge">馬場 {{ race.ground }}</span>
+    <p class="small warn">{{ race.source_note }}</p>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>穴狙い予想</h2>
+      <p class="small">妙味・展開ハマり・血統条件替わり・トラックバイアスを強めに評価。</p>
+      <h3>買い目：単勝</h3>
+      <ul>{% for x in analysis.ana_tickets["単勝"] %}<li>{{ x }}</li>{% endfor %}</ul>
+      <h3>買い目：馬連</h3>
+      <ul>{% for x in analysis.ana_tickets["馬連"] %}<li>{{ x }}</li>{% endfor %}</ul>
+      <h3>買い目：3連単</h3>
+      <ul>{% for x in analysis.ana_tickets["3連単"] %}<li>{{ x }}</li>{% endfor %}</ul>
+    </div>
+    <div class="card">
+      <h2>バランス予想</h2>
+      <p class="small">的中率と回収率の両立。能力・適性・状態・期待値を均等寄りに評価。</p>
+      <h3>買い目：単勝</h3>
+      <ul>{% for x in analysis.balanced_tickets["単勝"] %}<li>{{ x }}</li>{% endfor %}</ul>
+      <h3>買い目：馬連</h3>
+      <ul>{% for x in analysis.balanced_tickets["馬連"] %}<li>{{ x }}</li>{% endfor %}</ul>
+      <h3>買い目：3連単</h3>
+      <ul>{% for x in analysis.balanced_tickets["3連単"] %}<li>{{ x }}</li>{% endfor %}</ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>評価表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>穴</th><th>バランス</th><th>馬番</th><th>馬名</th><th>人気</th><th>オッズ</th>
+          <th>総合</th><th>穴指数</th><th>丞相風</th><th>うまログ風</th><th>血統</th><th>競馬場</th><th>騎手</th><th>調教師</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h, s in analysis.rows %}
+        <tr>
+          <td class="mark">{{ analysis.ana_marks.get(h.number, "") }}</td>
+          <td class="mark">{{ analysis.balanced_marks.get(h.number, "") }}</td>
+          <td>{{ h.number }}</td>
+          <td>{{ h.name }}</td>
+          <td>{{ h.popularity }}</td>
+          <td>{{ h.odds }}</td>
+          <td>{{ s.balanced }}</td>
+          <td>{{ s.ana }}</td>
+          <td>{{ s.josho }}</td>
+          <td>{{ s.umalog }}</td>
+          <td>{{ h.father }} / {{ h.damsire }}</td>
+          <td>{{ h.venue_score|round(1) }}</td>
+          <td>{{ h.jockey }} {{ h.jockey_score|round(1) }}</td>
+          <td>{{ h.trainer }} {{ h.trainer_score|round(1) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>人気YouTuber風 評価軸</h2>
+    <p class="small"><b>丞相風：</b>トラックバイアス、展開、コース形状、馬場、オッズ妙味を強調。</p>
+    <p class="small"><b>うまログ風：</b>血統、距離適性、馬場適性、条件替わり、人気に隠れた妙味を強調。</p>
+    <p class="small">本人の有料・非公開ノウハウの複製ではなく、公開動画や一般的な競馬予想観点から作った独自ロジックです。</p>
+  </div>
+  {% endif %}
+</main>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() { navigator.serviceWorker.register('/static/sw.js'); });
+}
+</script>
+</body>
+</html>

@@ -1,340 +1,134 @@
 
-from __future__ import annotations
-
-import re
-import random
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple, Optional
-
-import requests
-from bs4 import BeautifulSoup
-from flask import Flask, render_template, request
-
-APP_NAME = "KEIBA AI WEB PRO V2"
+from flask import Flask, request
 
 app = Flask(__name__)
+APP_NAME = "KEIBA AI WEB PRO V3"
 
+SAMPLE_HORSES = [
+    {"num":1, "name":"アスコリピチェーノ", "odds":3.2, "pop":1, "style":"差し"},
+    {"num":2, "name":"ステレンボッシュ", "odds":5.8, "pop":2, "style":"差し"},
+    {"num":3, "name":"マスクトディーヴァ", "odds":7.6, "pop":3, "style":"先行"},
+    {"num":4, "name":"ナミュール", "odds":8.9, "pop":4, "style":"差し"},
+    {"num":5, "name":"ウンブライル", "odds":18.4, "pop":8, "style":"追込"},
+    {"num":6, "name":"フィアスプライド", "odds":23.7, "pop":10, "style":"先行"},
+    {"num":7, "name":"サウンドビバーチェ", "odds":35.2, "pop":12, "style":"逃げ"},
+    {"num":8, "name":"コンクシェル", "odds":28.6, "pop":11, "style":"先行"},
+]
 
-@dataclass
-class Horse:
-    number: int
-    frame: int
-    name: str
-    jockey: str = "取得待ち"
-    trainer: str = "取得待ち"
-    age: str = "取得待ち"
-    weight: str = "取得待ち"
-    odds: float = 0.0
-    popularity: int = 0
-    father: str = "取得待ち"
-    mother: str = "取得待ち"
-    damsire: str = "取得待ち"
-    last_runs_score: float = 50.0
-    course_score: float = 50.0
-    venue_score: float = 50.0
-    ground_score: float = 50.0
-    distance_score: float = 50.0
-    jockey_score: float = 50.0
-    trainer_score: float = 50.0
-    workout_score: float = 50.0
-    paddock_score: float = 50.0
-    return_horse_score: float = 50.0
-    pace_fit_score: float = 50.0
-    bias_score: float = 50.0
-    blood_score: float = 50.0
+def esc(s):
+    return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
 
+def score_horse(h, mode, ground, venue):
+    base = 70 - (h["pop"] * 2.1)
+    odds_value = min(h["odds"] * 1.15, 28)
+    venue_bonus = 6 if venue in ["東京", "阪神", "京都"] and h["style"] in ["差し", "追込"] else 2
+    ground_bonus = 5 if ground in ["稍重", "重", "不良"] and h["odds"] >= 10 else 1
+    josho_style = venue_bonus + ground_bonus + odds_value * 0.25
+    umalog_style = 6 if h["style"] in ["差し", "先行"] else 3
+    if mode == "穴狙い":
+        return base + odds_value + josho_style + umalog_style
+    return base + (odds_value * 0.45) + josho_style + umalog_style
 
-@dataclass
-class RaceData:
-    race_name: str
-    venue: str
-    course: str
-    ground: str
-    distance: str
-    weather: str
-    horses: List[Horse]
-    source_note: str
-
-
-JRA_VENUES = ["東京", "中山", "京都", "阪神", "中京", "新潟", "札幌", "函館", "福島", "小倉"]
-
-
-def _safe_float(text: str) -> float:
-    m = re.search(r"\d+(?:\.\d+)?", text or "")
-    return float(m.group()) if m else 0.0
-
-
-def fetch_from_netkeiba_like_url(url: str, race_name: str) -> Optional[RaceData]:
-    """公開HTMLから取れる範囲だけ抽出する簡易取得器。
-    サイト側の構造変更やアクセス制限で失敗する場合があります。
-    """
-    if not url:
-        return None
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 KEIBA-AI-WEB-PRO-V2 personal research tool"
-        }
-        res = requests.get(url, headers=headers, timeout=12)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        text = soup.get_text("\n", strip=True)
-
-        title = race_name or (soup.title.get_text(strip=True) if soup.title else "取得レース")
-        venue = next((v for v in JRA_VENUES if v in text), "取得待ち")
-        ground = "重" if "重" in text else "稍重" if "稍重" in text else "不良" if "不良" in text else "良"
-        weather = "取得待ち"
-        distance = "取得待ち"
-        course = "取得待ち"
-
-        dist_match = re.search(r"(芝|ダート|ダ)\s*(\d{3,4})m", text)
-        if dist_match:
-            course = "芝" if dist_match.group(1) == "芝" else "ダート"
-            distance = f"{dist_match.group(2)}m"
-
-        horses: List[Horse] = []
-
-        # netkeibaの出馬表に近いテーブル構造を広めに拾う
-        for table in soup.find_all("table"):
-            rows = table.find_all("tr")
-            if len(rows) < 5:
-                continue
-            for row in rows:
-                cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-                joined = " ".join(cells)
-                # 馬番＋馬名らしき日本語/英数を検出
-                if len(cells) >= 4:
-                    nums = [int(x) for x in re.findall(r"(?<!\d)([1-9]|1[0-8])(?!\d)", joined)]
-                    horse_links = [a.get_text(strip=True) for a in row.find_all("a") if len(a.get_text(strip=True)) >= 2]
-                    candidates = [h for h in horse_links if not re.search(r"騎手|調教師|厩舎|馬主", h)]
-                    if nums and candidates:
-                        num = nums[0]
-                        name = candidates[0]
-                        if not any(h.number == num or h.name == name for h in horses):
-                            odds = 0.0
-                            pop = 0
-                            for c in cells:
-                                if re.fullmatch(r"\d+\.\d+", c):
-                                    odds = float(c)
-                                if re.fullmatch(r"\d+人気", c):
-                                    pop = int(c.replace("人気", ""))
-                            horses.append(Horse(
-                                number=num,
-                                frame=max(1, min(8, (num + 1)//2)),
-                                name=name,
-                                odds=odds,
-                                popularity=pop
-                            ))
-                if len(horses) >= 18:
-                    break
-            if len(horses) >= 5:
-                break
-
-        if len(horses) >= 3:
-            return RaceData(
-                race_name=title[:60],
-                venue=venue,
-                course=course,
-                ground=ground,
-                distance=distance,
-                weather=weather,
-                horses=sorted(horses, key=lambda h: h.number),
-                source_note="公開ページから取得しました。取得精度はページ構造に依存します。"
-            )
-    except Exception as e:
-        return None
-    return None
-
-
-def demo_race(race_name: str, venue: str) -> RaceData:
-    # 実データ取得失敗時にも動作確認できるサンプル。アプリの予想ロジック検証用。
-    names = [
-        "サンプルスター", "ゴールドライン", "ミラクルマイル", "ブラックバイアス",
-        "ラストスパート", "フォースブラッド", "ディープコース", "ワイドキング",
-        "トラックセンス", "オッズハンター", "パドッククイーン", "テンハヤテ"
-    ]
-    horses = []
-    for i, name in enumerate(names, start=1):
-        odds = round([2.8, 4.5, 6.2, 9.8, 13.4, 18.6, 23.1, 31.5, 42.0, 55.0, 68.0, 88.0][i-1], 1)
-        horses.append(Horse(
-            number=i,
-            frame=max(1, min(8, (i+1)//2)),
-            name=name,
-            jockey=random.choice(["川田", "ルメール", "横山武", "戸崎", "武豊", "坂井", "松山"]),
-            trainer=random.choice(["国枝", "友道", "矢作", "手塚", "中内田", "木村"]),
-            age=random.choice(["牡4", "牝4", "牡5", "牝5"]),
-            weight=random.choice(["55.0", "56.0", "57.0", "58.0"]),
-            odds=odds,
-            popularity=i,
-            father=random.choice(["ディープ系", "キングマンボ系", "ロベルト系", "サンデー系"]),
-            mother="母系取得待ち",
-            damsire=random.choice(["Storm Cat系", "Roberto系", "Danzig系"]),
-            last_runs_score=random.uniform(45, 85),
-            course_score=random.uniform(45, 90),
-            venue_score=random.uniform(45, 90),
-            ground_score=random.uniform(45, 90),
-            distance_score=random.uniform(45, 90),
-            jockey_score=random.uniform(45, 90),
-            trainer_score=random.uniform(45, 90),
-            workout_score=random.uniform(45, 90),
-            paddock_score=random.uniform(45, 90),
-            return_horse_score=random.uniform(45, 90),
-            pace_fit_score=random.uniform(45, 90),
-            bias_score=random.uniform(45, 90),
-            blood_score=random.uniform(45, 90),
-        ))
-    return RaceData(
-        race_name=race_name or "サンプル重賞",
-        venue=venue or "東京",
-        course="芝",
-        ground="良",
-        distance="1600m",
-        weather="晴",
-        horses=horses,
-        source_note="実データ取得に失敗したため、動作確認用サンプルで表示しています。実運用ではレースURLまたは正規データ連携を設定してください。"
+def make_prediction(race_name, venue, ground, mode):
+    ranked = sorted(
+        [(h, score_horse(h, mode, ground, venue)) for h in SAMPLE_HORSES],
+        key=lambda x: x[1],
+        reverse=True
     )
-
-
-def enrich_scores(h: Horse, race: RaceData) -> Dict[str, float]:
-    # 今まで決めた収集データを指数化
-    base = (
-        h.last_runs_score * 0.14 +
-        h.course_score * 0.10 +
-        h.venue_score * 0.10 +
-        h.ground_score * 0.08 +
-        h.distance_score * 0.08 +
-        h.jockey_score * 0.08 +
-        h.trainer_score * 0.08 +
-        h.workout_score * 0.08 +
-        h.paddock_score * 0.08 +
-        h.return_horse_score * 0.06 +
-        h.pace_fit_score * 0.06 +
-        h.blood_score * 0.06
-    )
-
-    # 丞相風：トラックバイアス・展開・馬場・買い目の期待値を強調
-    josho_style = (
-        h.bias_score * 0.32 +
-        h.pace_fit_score * 0.24 +
-        h.course_score * 0.18 +
-        h.ground_score * 0.14 +
-        value_score(h) * 0.12
-    )
-
-    # うまログ風：血統・条件替わり・距離/馬場適性・穴妙味を強調
-    umalog_style = (
-        h.blood_score * 0.34 +
-        h.distance_score * 0.20 +
-        h.ground_score * 0.16 +
-        h.venue_score * 0.12 +
-        longshot_boost(h) * 0.18
-    )
-
-    balanced = base * 0.70 + josho_style * 0.15 + umalog_style * 0.15
-    ana = base * 0.42 + josho_style * 0.25 + umalog_style * 0.23 + longshot_boost(h) * 0.10
-
-    return {
-        "base": round(base, 1),
-        "josho": round(josho_style, 1),
-        "umalog": round(umalog_style, 1),
-        "balanced": round(balanced, 1),
-        "ana": round(ana, 1),
-        "value": round(value_score(h), 1),
+    top = [x[0] for x in ranked[:3]]
+    tickets = {
+        "単勝": f"{top[0]['num']}番 {top[0]['name']}",
+        "馬連": f"{top[0]['num']}-{top[1]['num']}（{top[0]['name']} - {top[1]['name']}）",
+        "3連単": f"{top[0]['num']}→{top[1]['num']}→{top[2]['num']}（{top[0]['name']}→{top[1]['name']}→{top[2]['name']}）",
     }
-
-
-def value_score(h: Horse) -> float:
-    if h.odds <= 0:
-        return 55
-    # 期待値。過剰人気は少し下げ、妙味ある中穴を上げる。
-    if 6 <= h.odds <= 25:
-        return 82
-    if 25 < h.odds <= 60:
-        return 72
-    if h.odds < 3:
-        return 52
-    return 60
-
-
-def longshot_boost(h: Horse) -> float:
-    if h.popularity >= 7 or h.odds >= 15:
-        return 88
-    if h.popularity >= 4 or h.odds >= 7:
-        return 72
-    return 50
-
-
-def marks(ranked: List[Tuple[Horse, Dict[str, float]]], mode: str) -> Dict[int, str]:
-    symbols = ["◎", "○", "▲", "△", "☆"]
-    result = {}
-    for i, (h, _) in enumerate(ranked[:5]):
-        result[h.number] = symbols[i]
-    # 危険人気馬/消し
-    for h, s in ranked:
-        if h.popularity in (1, 2) and s[mode] < 62:
-            result[h.number] = "×"
-        elif s[mode] < 50:
-            result[h.number] = "消"
-    return result
-
-
-def make_tickets(ranked: List[Tuple[Horse, Dict[str, float]]], mode: str) -> Dict[str, List[str]]:
-    top = [h for h, _ in ranked[:5]]
-    if len(top) < 3:
-        return {"単勝": [], "馬連": [], "3連単": []}
-    if mode == "ana":
-        win = [f"{top[2].number} {top[2].name}", f"{top[4].number} {top[4].name}"]
-        umaren = [
-            f"{top[2].number}-{top[0].number}",
-            f"{top[4].number}-{top[0].number}",
-            f"{top[2].number}-{top[1].number}",
-        ]
-        trifecta = [
-            f"{top[2].number} → {top[0].number},{top[1].number} → {top[0].number},{top[1].number},{top[3].number},{top[4].number}",
-            f"{top[4].number} → {top[0].number},{top[2].number} → {top[0].number},{top[1].number},{top[2].number},{top[3].number}",
-        ]
-    else:
-        win = [f"{top[0].number} {top[0].name}"]
-        umaren = [
-            f"{top[0].number}-{top[1].number}",
-            f"{top[0].number}-{top[2].number}",
-            f"{top[1].number}-{top[2].number}",
-        ]
-        trifecta = [
-            f"{top[0].number} → {top[1].number},{top[2].number} → {top[1].number},{top[2].number},{top[3].number}",
-            f"{top[1].number} → {top[0].number} → {top[2].number},{top[3].number}",
-        ]
-    return {"単勝": win, "馬連": umaren, "3連単": trifecta}
-
-
-def analyze(race: RaceData):
-    rows = []
-    for h in race.horses:
-        rows.append((h, enrich_scores(h, race)))
-    balanced_rank = sorted(rows, key=lambda x: x[1]["balanced"], reverse=True)
-    ana_rank = sorted(rows, key=lambda x: x[1]["ana"], reverse=True)
-    return {
-        "rows": rows,
-        "balanced_rank": balanced_rank,
-        "ana_rank": ana_rank,
-        "balanced_marks": marks(balanced_rank, "balanced"),
-        "ana_marks": marks(ana_rank, "ana"),
-        "balanced_tickets": make_tickets(balanced_rank, "balanced"),
-        "ana_tickets": make_tickets(ana_rank, "ana"),
-    }
-
+    return ranked, tickets
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    race = None
-    analysis = None
-    if request.method == "POST":
-        race_name = request.form.get("race_name", "").strip()
-        venue = request.form.get("venue", "東京")
-        url = request.form.get("source_url", "").strip()
-        race = fetch_from_netkeiba_like_url(url, race_name) or demo_race(race_name, venue)
-        analysis = analyze(race)
-    return render_template("index.html", app_name=APP_NAME, venues=JRA_VENUES, race=race, analysis=analysis)
+    race_name = request.form.get("race_name", "ヴィクトリアマイル")
+    venue = request.form.get("venue", "東京")
+    ground = request.form.get("ground", "良")
+    venues = ["東京","中山","京都","阪神","中京","新潟","札幌","函館","福島","小倉"]
+    grounds = ["良","稍重","重","不良"]
 
+    html = f"""<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{APP_NAME}</title>
+<style>
+body {{ margin:0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0b0b0b; color:#f5f5f5; }}
+header {{ background:linear-gradient(90deg,#000,#2d2509); padding:18px; border-bottom:1px solid #d4af37; }}
+h1 {{ margin:0; color:#d4af37; font-size:24px; }}
+main {{ padding:16px; max-width:900px; margin:auto; }}
+.card {{ background:#171717; border:1px solid #333; border-radius:16px; padding:16px; margin:14px 0; box-shadow:0 6px 18px rgba(0,0,0,.25); }}
+label {{ display:block; margin-top:12px; color:#d4af37; font-weight:700; }}
+input, select {{ width:100%; box-sizing:border-box; padding:12px; border-radius:10px; border:1px solid #555; background:#0f0f0f; color:#fff; font-size:16px; }}
+button {{ width:100%; margin-top:16px; padding:14px; border:0; border-radius:12px; background:#d4af37; color:#111; font-weight:800; font-size:17px; }}
+table {{ width:100%; border-collapse:collapse; margin-top:12px; }}
+th,td {{ border-bottom:1px solid #333; padding:8px; text-align:left; }}
+th {{ color:#d4af37; }}
+.badge {{ display:inline-block; background:#2c250f; color:#d4af37; padding:4px 8px; border-radius:8px; margin:2px; }}
+.small {{ color:#bbb; font-size:13px; line-height:1.6; }}
+.pick {{ font-size:18px; font-weight:800; color:#ffd95a; }}
+</style>
+</head>
+<body>
+<header><h1>{APP_NAME}</h1><div>JRA予想支援・穴狙い / バランス対応</div></header>
+<main>
+<div class="card">
+<form method="post">
+<label>レース名</label>
+<input name="race_name" value="{esc(race_name)}" placeholder="例：ヴィクトリアマイル">
+<label>競馬場</label>
+<select name="venue">
+"""
+    for v in venues:
+        sel = "selected" if v == venue else ""
+        html += f'<option value="{v}" {sel}>{v}</option>'
+    html += '</select><label>馬場</label><select name="ground">'
+    for g in grounds:
+        sel = "selected" if g == ground else ""
+        html += f'<option value="{g}" {sel}>{g}</option>'
+    html += '</select><button type="submit">AI予想を作成</button></form></div>'
+
+    for mode in ["穴狙い", "バランス"]:
+        ranked, tickets = make_prediction(race_name, venue, ground, mode)
+        html += f"""
+<div class="card">
+<h2>{esc(race_name)}：{mode}予想</h2>
+<p><span class="badge">{venue}</span><span class="badge">{ground}</span><span class="badge">単勝・馬連・3連単</span></p>
+<h3>推奨買い目</h3>
+<p class="pick">単勝：{tickets["単勝"]}</p>
+<p class="pick">馬連：{tickets["馬連"]}</p>
+<p class="pick">3連単：{tickets["3連単"]}</p>
+<h3>AI印</h3>
+<table><tr><th>印</th><th>馬番</th><th>馬名</th><th>人気</th><th>想定オッズ</th><th>指数</th></tr>
+"""
+        marks = ["◎","○","▲","△","☆"]
+        for i, (h, s) in enumerate(ranked[:5]):
+            html += f"<tr><td>{marks[i]}</td><td>{h['num']}</td><td>{h['name']}</td><td>{h['pop']}人気</td><td>{h['odds']}</td><td>{s:.1f}</td></tr>"
+        html += """</table>
+<p class="small">
+丞相風補正：トラックバイアス、馬場、展開、人気に対する妙味を重視。<br>
+うまログ風補正：血統・距離適性・馬場適性・条件替わり・穴妙味を重視。<br>
+※本人の有料・非公開ノウハウの複製ではなく、公開動画や一般的な競馬予想観点を参考にした独自ロジックです。
+</p>
+</div>
+"""
+    html += """
+<div class="card">
+<h3>データ取得について</h3>
+<p class="small">
+現在はRenderで確実に起動するため、サンプル実名データで動作します。
+次段階でJRA/netkeiba等の公開ページ取得またはCSV取込を追加できます。
+公開サイト取得はサイト構造変更やアクセス制限で失敗する場合があります。
+</p>
+</div>
+</main></body></html>
+"""
+    return html
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)
